@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Team Login - TeamTime Pro</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="login-body">
+  <div class="login-card-container">
+    
+    <!-- Apps Script Integration Note -->
+    <div id="appsScriptBanner" class="config-banner" style="display:none;">
+      <div>
+        <strong>Google Apps Script Backend Ready</strong>
+        <div style="color:var(--text-muted);font-size:12px;margin-top:2px;">
+          Use Admin <code>ADMIN001</code> / <code>AdminPassword@123</code> or Employee <code>EMP001</code> / <code>pass123</code> to test.
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Login Card -->
+    <div class="card" id="loginCard">
+      <div class="card-body" style="padding: 36px 32px;">
+        
+        <!-- Logo & Header -->
+        <div class="login-header-logo">
+          <div class="login-logo-box" id="companyLogo">
+            T
+          </div>
+          <h1>TeamTime Pro</h1>
+          <p>Sign in to record your daily attendance</p>
+        </div>
+
+        <!-- Error Message Alert -->
+        <div id="loginErrorAlert" class="alert-box alert-danger" style="display: none;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span id="loginErrorMessage">Invalid Employee ID or password</span>
+        </div>
+
+        <!-- Login Form -->
+        <form id="loginForm" autocomplete="off">
+          
+          <!-- Employee ID -->
+          <div class="form-group">
+            <label for="employeeId" class="form-label">Employee ID</label>
+            <div class="input-wrapper">
+              <input 
+                type="text" 
+                id="employeeId" 
+                name="employeeId" 
+                class="form-control" 
+                placeholder="e.g. EMP001 or ADMIN001" 
+                required 
+                autofocus
+              >
+            </div>
+          </div>
+
+          <!-- Password with Show/Hide button -->
+          <div class="form-group" style="margin-bottom: 20px;">
+            <label for="password" class="form-label">Password</label>
+            <div class="input-wrapper">
+              <input 
+                type="password" 
+                id="password" 
+                name="password" 
+                class="form-control" 
+                placeholder="Enter your password" 
+                required
+              >
+              <button 
+                type="button" 
+                id="togglePasswordBtn" 
+                class="input-addon-btn" 
+                title="Show/Hide Password"
+                aria-label="Toggle password visibility"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                  <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Submit Button with Loading State -->
+          <button type="submit" id="loginSubmitBtn" class="btn btn-primary btn-full btn-lg" style="margin-bottom:16px;">
+            <span id="loginBtnSpinner" class="spinner" style="display:none;"></span>
+            <span id="loginBtnText">Sign In</span>
+          </button>
+        </form>
+
+        <!-- Quick 1-Click Demo Login Options -->
+        <div style="border-top: 1px solid var(--border-color); padding-top: 16px; margin-top: 8px;">
+          <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; text-align: center; margin-bottom: 10px;">
+            Quick 1-Click Sign In
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            <button type="button" id="quickLoginAdminBtn" class="btn btn-secondary btn-sm" style="font-size: 12px; justify-content: center;">
+              👑 Login Admin
+            </button>
+            <button type="button" id="quickLoginEmpBtn" class="btn btn-outline btn-sm" style="font-size: 12px; justify-content: center;">
+              👤 Login Employee
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Secure notice footer -->
+    <div style="text-align: center; margin-top: 20px; font-size: 12px; color: var(--text-muted);">
+      <span>Protected by Google Apps Script &amp; Google Sheets</span>
+      <div style="margin-top: 4px;">Timezone: <strong>Asia/Dubai</strong> (UTC+4)</div>
+    </div>
+
+  </div>
+
+  <script src="script.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", initLoginPage);
+  </script>
+</body>
+</html>
