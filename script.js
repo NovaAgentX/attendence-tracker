@@ -947,7 +947,6 @@ function renderMatrix() {
         <td class="col-summary font-bold" style="color:var(--status-lop-text);">${empLOP}</td>
         <td class="col-summary font-bold" style="color:var(--status-vil-text);">${empVIL}</td>
         <td class="col-summary font-bold" style="color:var(--status-hol-text);">${empHOL}</td>
-        <td class="col-total-payable">${payableDays}</td>
       </tr>
     `;
   });
