@@ -1295,7 +1295,6 @@ function renderReports() {
               <th>Loss of Pay (LOP)</th>
               <th>Vacation (VIL)</th>
               <th>Holiday (H)</th>
-              <th>Payable Days</th>
               <th>Attendance Rate</th>
               <th class="text-right no-print">Action</th>
             </tr>
@@ -1330,7 +1329,6 @@ function renderReports() {
         <td><span class="status-badge LOP">${lop}</span></td>
         <td><span class="status-badge VIL">${vil}</span></td>
         <td><span class="status-badge H">${hol}</span></td>
-        <td class="font-bold text-primary" style="font-size:14px;">${payable}</td>
         <td>
           <div style="display:flex; align-items:center; gap:8px;">
             <div style="flex:1; background:#E2E8F0; height:6px; border-radius:3px; overflow:hidden; min-width:60px;">
