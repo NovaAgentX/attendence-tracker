@@ -857,7 +857,6 @@ function renderMatrix() {
           <th rowspan="2" class="col-summary" title="Loss of Pay">LOP</th>
           <th rowspan="2" class="col-summary" title="Vacation in Lieu">VIL</th>
           <th rowspan="2" class="col-summary" title="Holiday / Sunday">H</th>
-          <th rowspan="2" class="col-total-payable" title="Payable Days (P + SL + VIL + H)">Payable</th>
         </tr>
         <tr>
   `;
