@@ -1187,10 +1187,6 @@ function renderReports() {
           <div class="kpi-val" style="color:var(--status-hol-text);">${hol}</div>
           <div class="kpi-lbl">Holiday / Sun (H)</div>
         </div>
-        // <div class="kpi-chip" style="background:#EFF6FF; border-color:#BFDBFE;">
-        //   <div class="kpi-val" style="color:var(--primary);">${payableDays}</div>
-        //   <div class="kpi-lbl">Total Payable Days</div>
-        // </div>
       </div>
 
       <!-- Day-by-Day Detailed Timesheet Table -->
