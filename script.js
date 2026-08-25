@@ -1,0 +1,2532 @@
+/**
+ * ==============================================================================
+ * ATTENDANCE TRACKER - VANILLA JAVASCRIPT APPLICATION CORE
+ * ==============================================================================
+ * 
+ * Technology: Pure HTML5 + CSS3 + Vanilla JavaScript (ES6+)
+ * Database: Google Sheets
+ * API: Google Apps Script Web App
+ * ==============================================================================
+ */
+
+// ==============================================================================
+// 1. CONFIGURATION & APPLICATION STATE
+// ==============================================================================
+
+const STORAGE_KEYS = {
+  API_URL: 'attendance_gas_api_url',
+  EMPLOYEES: 'attendance_local_employees',
+  ATTENDANCE: 'attendance_local_attendance',
+  VACATIONS: 'attendance_local_vacations',
+  HOLIDAYS: 'attendance_local_holidays',
+  SETTINGS: 'attendance_local_settings',
+  USERS: 'attendance_local_users',
+  CURRENT_USER: 'attendance_current_user'
+};
+
+// No hardcoded demo accounts. In Local Demo Mode (before a Google Sheet is
+// connected in Settings), sign up creates a temporary account in this browser only.
+const DEFAULT_USERS = [];
+
+const DEFAULT_SETTINGS = {
+  STATUS_P: 'Present',
+  STATUS_SL: 'Sick Leave',
+  STATUS_CL: 'Casual Leave',
+  STATUS_WL: 'Wellness Leave',
+  STATUS_LOP: 'Loss of Pay',
+  STATUS_HLOP: 'Half Day - Loss of Pay',
+  STATUS_HSL: 'Half Day - Sick Leave',
+  STATUS_VIL: 'Vacation in Lieu',
+  STATUS_HOLIDAY: 'Company Holiday / Sunday',
+  COMPANY_NAME: 'Enterprise Solutions Corp',
+  WORKING_DAYS: 'Mon-Sat'
+};
+
+// ==============================================================================
+// STATUS METADATA — single source of truth for every recognized attendance
+// status code. Adding a new leave type only requires an entry here plus a
+// matching CSS badge class (see style.css .status-badge.<CODE>).
+//   payable  -> how many "payable" days this status contributes (payroll)
+//   present  -> how many "present" days this status contributes
+//   isLeave  -> true if this counts as a leave/absence type for the Yearly
+//               Leave Tracker (P and H are excluded from that view)
+// ==============================================================================
+const STATUS_META = {
+  P:    { label: 'Present',             short: 'P',    payable: 1,   present: 1,   isLeave: false },
+  SL:   { label: 'Sick Leave',          short: 'SL',   payable: 1,   present: 0,   isLeave: true },
+  CL:   { label: 'Casual Leave',        short: 'CL',   payable: 1,   present: 0,   isLeave: true },
+  WL:   { label: 'Wellness Leave',      short: 'WL',   payable: 1,   present: 0,   isLeave: true },
+  LOP:  { label: 'Loss of Pay',         short: 'LOP',  payable: 0,   present: 0,   isLeave: true },
+  HLOP: { label: 'Half Day - Loss of Pay', short: 'HLOP', payable: 0.5, present: 0.5, isLeave: true },
+  HSL:  { label: 'Half Day - Sick Leave',  short: 'HSL',  payable: 1,   present: 0.5, isLeave: true },
+  VIL:  { label: 'Vacation in Lieu',    short: 'VIL',  payable: 1,   present: 0,   isLeave: true },
+  H:    { label: 'Holiday / Sunday',    short: 'H',    payable: 1,   present: 0,   isLeave: false },
+  'N/A':{ label: 'Not Marked Yet',      short: 'N/A',  payable: 0,   present: 0,   isLeave: false }
+};
+
+// Ordered list of the "leave" status codes shown in the Yearly Leave Tracker
+const LEAVE_TYPE_ORDER = ['SL', 'CL', 'WL', 'LOP', 'HLOP', 'HSL', 'VIL'];
+
+function createEmptyTally() {
+  const t = {};
+  Object.keys(STATUS_META).forEach(k => { t[k] = 0; });
+  return t;
+}
+
+function addToTally(tally, st) {
+  if (Object.prototype.hasOwnProperty.call(tally, st)) {
+    tally[st]++;
+  } else {
+    tally[st] = (tally[st] || 0) + 1;
+  }
+}
+
+function computePayableDays(tally) {
+  let total = 0;
+  Object.keys(STATUS_META).forEach(st => {
+    if (st === 'N/A') return;
+    total += (tally[st] || 0) * STATUS_META[st].payable;
+  });
+  return total;
+}
+
+const INITIAL_SAMPLE_EMPLOYEES = [
+  { id: 'UP05', name: 'G Diwakar', status: 'Active', createdAt: '2026-08-01' },
+  { id: 'UP18', name: 'Vignesh', status: 'Active', createdAt: '2026-08-01' },
+  { id: 'UP38', name: 'Arti', status: 'Active', createdAt: '2026-08-01' },
+  { id: 'UP42', name: 'Priya Sharma', status: 'Active', createdAt: '2026-08-01' },
+  { id: 'UP50', name: 'Rajesh Kumar', status: 'Active', createdAt: '2026-08-01' }
+];
+
+const INITIAL_SAMPLE_VACATIONS = [
+  {
+    employeeId: 'UP38',
+    employeeName: 'Arti',
+    leaveType: 'VIL',
+    startDate: '2026-08-09',
+    endDate: '2026-08-25',
+    createdAt: '2026-08-01 10:30'
+  }
+];
+
+const INITIAL_SAMPLE_HOLIDAYS = [
+  { date: '2026-08-15', holidayName: 'Independence Day', createdAt: '2026-08-01 10:00' },
+  { date: '2026-08-23', holidayName: 'Company Holiday', createdAt: '2026-08-01 10:40' }
+];
+
+const INITIAL_SAMPLE_ATTENDANCE = [
+  { date: '2026-08-19', employeeId: 'UP05', employeeName: 'G Diwakar', status: 'P', updatedAt: '2026-08-19 10:30' },
+  { date: '2026-08-19', employeeId: 'UP18', employeeName: 'Vignesh', status: 'SL', updatedAt: '2026-08-19 10:31' }
+];
+
+const AppState = {
+  currentYear: 2026,
+  currentMonth: 8, // 1 - 12 (August 2026 by default)
+  activeTab: 'matrix',
+  apiUrl: localStorage.getItem(STORAGE_KEYS.API_URL) || 'https://script.google.com/macros/s/AKfycbyNn4Qc0yQZ5m2Ir9Ko6_z6WwE2RHQfvMAdcfdj6AzHrsiOMMPhGaPleleSIB_EwhE/exec',
+  isConnected: false,
+  isLoading: false,
+  
+  // Auth Store
+  users: [],
+  currentUser: null,
+  authTab: 'signin', // 'signin' | 'signup' | 'reset'
+
+  // Yearly Leave Tracker
+  selectedYearlyEmployeeId: null,
+  selectedYearlyYear: 2026,
+
+  // Data Store
+  employees: [],
+  attendance: [],
+  vacations: [],
+  holidays: [],
+  settings: { ...DEFAULT_SETTINGS },
+  
+  // Search & Filter
+  searchTerm: '',
+  statusFilter: 'all',
+  selectedReportEmployeeId: 'ALL', // 'ALL' or specific Employee ID
+  
+  // Quick Cell Target
+  activeCellTarget: null // { employeeId, date, currentStatus }
+};
+
+// ==============================================================================
+// 2. INITIALIZATION
+// ==============================================================================
+
+document.addEventListener('DOMContentLoaded', () => {
+  initApp();
+});
+
+async function initApp() {
+  loadLocalData();
+  bindUIEvents();
+  switchTab(AppState.currentUser ? 'matrix' : 'home');
+}
+
+function loadLocalData() {
+  const savedEmployees = localStorage.getItem(STORAGE_KEYS.EMPLOYEES);
+  const savedAttendance = localStorage.getItem(STORAGE_KEYS.ATTENDANCE);
+  const savedVacations = localStorage.getItem(STORAGE_KEYS.VACATIONS);
+  const savedHolidays = localStorage.getItem(STORAGE_KEYS.HOLIDAYS);
+  const savedSettings = localStorage.getItem(STORAGE_KEYS.SETTINGS);
+  const savedUsers = localStorage.getItem(STORAGE_KEYS.USERS);
+  const savedCurrentUser = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
+
+  AppState.employees = savedEmployees ? JSON.parse(savedEmployees) : [...INITIAL_SAMPLE_EMPLOYEES];
+  AppState.attendance = savedAttendance ? JSON.parse(savedAttendance) : [...INITIAL_SAMPLE_ATTENDANCE];
+  AppState.vacations = savedVacations ? JSON.parse(savedVacations) : [...INITIAL_SAMPLE_VACATIONS];
+  AppState.holidays = savedHolidays ? JSON.parse(savedHolidays) : [...INITIAL_SAMPLE_HOLIDAYS];
+  AppState.settings = savedSettings ? JSON.parse(savedSettings) : { ...DEFAULT_SETTINGS };
+  AppState.users = savedUsers ? JSON.parse(savedUsers) : [...DEFAULT_USERS];
+  AppState.currentUser = savedCurrentUser ? JSON.parse(savedCurrentUser) : null;
+  AppState.activeTab = AppState.currentUser ? 'matrix' : 'home';
+
+  saveLocalData();
+}
+
+function saveLocalData() {
+  localStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(AppState.employees));
+  localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(AppState.attendance));
+  localStorage.setItem(STORAGE_KEYS.VACATIONS, JSON.stringify(AppState.vacations));
+  localStorage.setItem(STORAGE_KEYS.HOLIDAYS, JSON.stringify(AppState.holidays));
+  localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(AppState.settings));
+  localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(AppState.users));
+  if (AppState.currentUser) {
+    localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(AppState.currentUser));
+  } else {
+    localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+  }
+}
+
+// ==============================================================================
+// 3. EVENT BINDINGS
+// ==============================================================================
+
+function bindUIEvents() {
+  // Brand Click -> Go to Matrix if logged in, else Home
+  document.getElementById('brandHomeBtn')?.addEventListener('click', () => {
+    if (AppState.currentUser) {
+      switchTab('matrix');
+    } else {
+      switchTab('home');
+    }
+  });
+
+  // Tab Switching
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      switchTab(tab);
+    });
+  });
+
+  // Auth Tabs
+  document.querySelectorAll('.auth-nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.authTab;
+      switchAuthTab(tab);
+    });
+  });
+
+  // Auth Forms
+  document.getElementById('authSignInForm')?.addEventListener('submit', handleSignIn);
+  document.getElementById('authSignUpForm')?.addEventListener('submit', handleSignUp);
+  document.getElementById('authResetForm')?.addEventListener('submit', handleResetPassword);
+
+  // Month Navigation
+  document.getElementById('prevMonthBtn')?.addEventListener('click', () => changeMonth(-1));
+  document.getElementById('nextMonthBtn')?.addEventListener('click', () => changeMonth(1));
+  document.getElementById('todayBtn')?.addEventListener('click', () => jumpToCurrentMonth());
+
+  // Search filter
+  const searchInput = document.getElementById('employeeSearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      AppState.searchTerm = e.target.value.toLowerCase().trim();
+      renderMatrix();
+      renderEmployeesTable();
+    });
+  }
+
+  // Reports Filter & Actions
+  const reportFilter = document.getElementById('reportEmployeeFilter');
+  if (reportFilter) {
+    reportFilter.addEventListener('change', (e) => {
+      AppState.selectedReportEmployeeId = e.target.value;
+      renderReports();
+    });
+  }
+
+  // Yearly Leave Tracker Filter & Actions
+  const yearlyEmpFilter = document.getElementById('yearlyEmployeeFilter');
+  if (yearlyEmpFilter) {
+    yearlyEmpFilter.addEventListener('change', (e) => {
+      AppState.selectedYearlyEmployeeId = e.target.value;
+      renderYearlyTracker();
+    });
+  }
+  const yearlyYearInput = document.getElementById('yearlyYearInput');
+  if (yearlyYearInput) {
+    yearlyYearInput.addEventListener('change', (e) => {
+      const y = parseInt(e.target.value, 10);
+      AppState.selectedYearlyYear = y || AppState.currentYear;
+      renderYearlyTracker();
+    });
+  }
+
+  document.getElementById('reportPrevEmpBtn')?.addEventListener('click', () => navigateReportEmployee(-1));
+  document.getElementById('reportNextEmpBtn')?.addEventListener('click', () => navigateReportEmployee(1));
+  document.getElementById('printEmployeeReportBtn')?.addEventListener('click', printEmployeeReport);
+  document.getElementById('exportEmployeeCsvBtn')?.addEventListener('click', exportEmployeeCsv);
+
+  // Action Buttons
+  document.getElementById('exportCsvBtn')?.addEventListener('click', exportToCsv);
+  document.getElementById('bulkMarkBtn')?.addEventListener('click', openBulkMarkModal);
+
+  // Modals Close handlers
+  document.querySelectorAll('.modal-close-btn, .btn-modal-cancel').forEach(btn => {
+    btn.addEventListener('click', closeAllModals);
+  });
+
+  // Click Outside Modal to Close
+  document.querySelectorAll('.modal-overlay').forEach(modal => {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closeAllModals();
+    });
+  });
+
+  // Modal Forms
+  document.getElementById('employeeForm')?.addEventListener('submit', handleEmployeeFormSubmit);
+  document.getElementById('vacationForm')?.addEventListener('submit', handleVacationFormSubmit);
+  document.getElementById('holidayForm')?.addEventListener('submit', handleHolidayFormSubmit);
+  document.getElementById('bulkMarkForm')?.addEventListener('submit', handleBulkMarkFormSubmit);
+  document.getElementById('gasSettingsForm')?.addEventListener('submit', handleGasSettingsSubmit);
+
+  // Status Selector Buttons in Cell Modal
+  document.querySelectorAll('.status-choice-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.status-choice-btn').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+      const status = btn.dataset.status;
+      applyCellStatus(status);
+    });
+  });
+}
+
+function switchTab(tabName) {
+  // Gating: If not logged in, only allow 'home' (Auth Portal)
+  if (!AppState.currentUser) {
+    if (tabName !== 'home') {
+      showToast('Please sign in or register to access the attendance features.', 'warning');
+    }
+    tabName = 'home';
+  }
+
+  AppState.activeTab = tabName;
+
+  // Update tab buttons active classes
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tabName);
+  });
+
+  // Toggle view section visibility
+  document.querySelectorAll('.view-section').forEach(sec => {
+    sec.classList.toggle('hidden', sec.id !== `view-${tabName}`);
+  });
+
+  // Toggle Navigation Tabs Bar (Only visible when user is authenticated)
+  const navTabs = document.getElementById('mainNavTabs');
+  if (navTabs) {
+    navTabs.classList.toggle('hidden', !AppState.currentUser);
+  }
+
+  // Toggle dashboard control bar, metrics, and legend (Only visible when logged in AND not on home)
+  const showDashboardWidgets = !!AppState.currentUser && tabName !== 'home';
+  const controlBar = document.getElementById('dashboardControlBar');
+  const metricsGrid = document.getElementById('dashboardMetricsGrid');
+  const legendBar = document.getElementById('dashboardLegendBar');
+  const overviewBar = document.getElementById('monthlyOverviewBar');
+
+  if (controlBar) controlBar.classList.toggle('hidden', !showDashboardWidgets);
+  if (metricsGrid) metricsGrid.classList.toggle('hidden', !showDashboardWidgets);
+  if (legendBar) legendBar.classList.toggle('hidden', !showDashboardWidgets);
+  if (overviewBar) overviewBar.classList.toggle('hidden', !showDashboardWidgets);
+
+  renderApp();
+}
+
+function changeMonth(delta) {
+  let newMonth = AppState.currentMonth + delta;
+  let newYear = AppState.currentYear;
+
+  if (newMonth > 12) {
+    newMonth = 1;
+    newYear++;
+  } else if (newMonth < 1) {
+    newMonth = 12;
+    newYear--;
+  }
+
+  AppState.currentMonth = newMonth;
+  AppState.currentYear = newYear;
+
+  renderApp();
+  showToast(`Navigated to ${getMonthName(AppState.currentMonth)} ${AppState.currentYear}`, 'info');
+}
+
+function jumpToCurrentMonth() {
+  const now = new Date();
+  AppState.currentYear = now.getFullYear();
+  AppState.currentMonth = now.getMonth() + 1;
+  renderApp();
+  showToast(`Jumped to Current Month`, 'info');
+}
+
+// ==============================================================================
+// AUTHENTICATION & HOME PORTAL LOGIC
+// ==============================================================================
+
+window.switchAuthTab = function(tab) {
+  AppState.authTab = tab;
+  
+  // Update Buttons
+  document.querySelectorAll('.auth-nav-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.authTab === tab);
+  });
+
+  // Toggle Form Panels
+  const signInForm = document.getElementById('authSignInForm');
+  const signUpForm = document.getElementById('authSignUpForm');
+  const resetForm = document.getElementById('authResetForm');
+
+  if (signInForm) signInForm.classList.toggle('hidden', tab !== 'signin');
+  if (signUpForm) signUpForm.classList.toggle('hidden', tab !== 'signup');
+  if (resetForm) resetForm.classList.toggle('hidden', tab !== 'reset');
+};
+
+window.togglePasswordVisibility = function(inputId) {
+  const input = document.getElementById(inputId);
+  if (input) {
+    input.type = input.type === 'password' ? 'text' : 'password';
+  }
+};
+
+async function handleSignIn(e) {
+  e.preventDefault();
+  const identifier = document.getElementById('loginIdentifier').value.trim().toLowerCase();
+  const password = document.getElementById('loginPassword').value;
+
+  if (!identifier || !password) {
+    showToast('Please enter your email/ID and password.', 'warning');
+    return;
+  }
+
+  // LIVE MODE: Check credentials against the Users sheet via Google Apps Script
+  if (AppState.apiUrl) {
+    showToast('Signing in...', 'info');
+    try {
+      const result = await sendGasRequest('signIn', { identifier, password });
+      if (result && result.success) {
+        const u = result.data;
+        const user = { id: u.employeeId, name: u.name, email: u.email, role: u.role, createdAt: u.createdAt };
+        AppState.currentUser = user;
+        saveLocalData();
+        showToast(`Welcome back, ${user.name}! (${user.role})`, 'success');
+        renderApp();
+        switchTab('matrix');
+        syncWithGoogleAppsScript(false);
+      } else {
+        showToast(result?.message || 'Invalid email/ID or password.', 'error');
+      }
+    } catch (err) {
+      showToast(`Sign in failed: ${err.message}. Check your connection in Settings.`, 'error');
+    }
+    return;
+  }
+
+  // LOCAL DEMO MODE (no Google Sheet connected yet)
+  const user = AppState.users.find(u => 
+    (u.email.toLowerCase() === identifier || u.id.toLowerCase() === identifier) && 
+    u.password === password
+  );
+
+  if (user) {
+    AppState.currentUser = user;
+    saveLocalData();
+    showToast(`Welcome back, ${user.name}! (${user.role}) [Local Demo Mode]`, 'success');
+    renderApp();
+    switchTab('matrix');
+  } else {
+    showToast('Invalid email/ID or password. Try demo credentials!', 'error');
+  }
+}
+
+async function handleSignUp(e) {
+  e.preventDefault();
+  const fullName = document.getElementById('signupFullName').value.trim();
+  const empId = document.getElementById('signupEmpId').value.trim().toUpperCase();
+  const role = document.getElementById('signupRole').value;
+  const email = document.getElementById('signupEmail').value.trim().toLowerCase();
+  const password = document.getElementById('signupPassword').value;
+  const confirmPassword = document.getElementById('signupConfirmPassword').value;
+
+  if (!fullName || !empId || !email || !password) {
+    showToast('Please fill in all required fields.', 'warning');
+    return;
+  }
+
+  if (password !== confirmPassword) {
+    showToast('Passwords do not match.', 'error');
+    return;
+  }
+
+  if (password.length < 6) {
+    showToast('Password must be at least 6 characters.', 'warning');
+    return;
+  }
+
+  // LIVE MODE: Create the account in the Users sheet via Google Apps Script
+  if (AppState.apiUrl) {
+    showToast('Creating account...', 'info');
+    try {
+      const result = await sendGasRequest('signUp', {
+        name: fullName, employeeId: empId, role, email, password
+      });
+      if (result && result.success) {
+        const newUser = { id: empId, name: fullName, email, role, createdAt: result.data.createdAt };
+        AppState.currentUser = newUser;
+        saveLocalData();
+        document.getElementById('authSignUpForm').reset();
+        showToast(`Account successfully created! Welcome, ${newUser.name}.`, 'success');
+        renderApp();
+        switchTab('matrix');
+        syncWithGoogleAppsScript(false);
+      } else {
+        showToast(result?.message || 'Could not create account.', 'error');
+      }
+    } catch (err) {
+      showToast(`Sign up failed: ${err.message}. Check your connection in Settings.`, 'error');
+    }
+    return;
+  }
+
+  // LOCAL DEMO MODE (no Google Sheet connected yet)
+  const existing = AppState.users.find(u => u.email.toLowerCase() === email || u.id.toLowerCase() === empId.toLowerCase());
+  if (existing) {
+    showToast(`An account with ID ${empId} or email ${email} already exists.`, 'error');
+    return;
+  }
+
+  const newUser = {
+    id: empId,
+    name: fullName,
+    email: email,
+    role: role,
+    password: password,
+    createdAt: formatDateTimeNow().split(' ')[0]
+  };
+
+  AppState.users.push(newUser);
+
+  if (!AppState.employees.some(e => e.id.toLowerCase() === empId.toLowerCase())) {
+    AppState.employees.push({
+      id: empId,
+      name: fullName,
+      status: 'Active',
+      createdAt: newUser.createdAt
+    });
+  }
+
+  AppState.currentUser = newUser;
+  saveLocalData();
+
+  document.getElementById('authSignUpForm').reset();
+  showToast(`Account created in Local Demo Mode (connect Google Sheet in Settings to make this permanent).`, 'success');
+  renderApp();
+  switchTab('matrix');
+}
+
+async function handleResetPassword(e) {
+  e.preventDefault();
+  const identifier = document.getElementById('resetIdentifier').value.trim().toLowerCase();
+  const newPassword = document.getElementById('resetNewPassword').value;
+  const confirmPassword = document.getElementById('resetConfirmPassword').value;
+
+  if (!identifier || !newPassword) {
+    showToast('Please enter your email or ID and new password.', 'warning');
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    showToast('New passwords do not match.', 'error');
+    return;
+  }
+
+  if (newPassword.length < 6) {
+    showToast('Password must be at least 6 characters.', 'warning');
+    return;
+  }
+
+  // LIVE MODE: Update the password in the Users sheet via Google Apps Script
+  if (AppState.apiUrl) {
+    showToast('Resetting password...', 'info');
+    try {
+      const result = await sendGasRequest('resetPassword', { identifier, newPassword });
+      if (result && result.success) {
+        showToast('Password has been reset successfully! Please sign in with your new password.', 'success');
+        document.getElementById('authResetForm').reset();
+        switchAuthTab('signin');
+      } else {
+        showToast(result?.message || 'Could not reset password.', 'error');
+      }
+    } catch (err) {
+      showToast(`Reset failed: ${err.message}. Check your connection in Settings.`, 'error');
+    }
+    return;
+  }
+
+  // LOCAL DEMO MODE (no Google Sheet connected yet)
+  const userIndex = AppState.users.findIndex(u => 
+    u.email.toLowerCase() === identifier || u.id.toLowerCase() === identifier
+  );
+
+  if (userIndex >= 0) {
+    AppState.users[userIndex].password = newPassword;
+    saveLocalData();
+    showToast('Password has been reset successfully! Please sign in with your new password. [Local Demo Mode]', 'success');
+    document.getElementById('authResetForm').reset();
+    switchAuthTab('signin');
+  } else {
+    showToast(`No registered user found matching "${identifier}".`, 'error');
+  }
+}
+
+window.handleSignOut = function() {
+  AppState.currentUser = null;
+  saveLocalData();
+  showToast('You have signed out successfully.', 'info');
+  renderApp();
+  switchTab('home');
+};
+
+function renderHeaderAuth() {
+  const container = document.getElementById('headerAuthSection');
+  if (!container) return;
+
+  if (AppState.currentUser) {
+    const initials = AppState.currentUser.name
+      .split(' ')
+      .map(n => n[0])
+      .join('')
+      .substring(0, 2)
+      .toUpperCase();
+
+    container.innerHTML = `
+      <div class="header-user-chip" title="Active Session: ${AppState.currentUser.email}">
+        <div class="user-avatar-circle">${initials}</div>
+        <div class="user-meta">
+          <span class="user-meta-name">${AppState.currentUser.name}</span>
+          <span class="user-meta-role">${AppState.currentUser.role}</span>
+        </div>
+        <button type="button" class="btn-signout" onclick="handleSignOut()" title="Sign out of account">
+          Sign Out
+        </button>
+      </div>
+    `;
+  } else {
+    container.innerHTML = `
+      <span class="auth-guest-badge">🔒 Sign In Required</span>
+    `;
+  }
+}
+
+function renderHomeView() {
+  const loggedInCard = document.getElementById('authLoggedInView');
+  const formsContainer = document.getElementById('authFormsContainer');
+  const welcomeAvatar = document.getElementById('welcomeUserAvatar');
+  const welcomeName = document.getElementById('welcomeUserName');
+  const welcomeEmail = document.getElementById('welcomeUserEmail');
+
+  if (AppState.currentUser) {
+    if (loggedInCard) loggedInCard.classList.remove('hidden');
+    if (formsContainer) formsContainer.classList.add('hidden');
+    
+    if (welcomeAvatar) {
+      const initials = AppState.currentUser.name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+      welcomeAvatar.textContent = initials;
+    }
+    if (welcomeName) welcomeName.textContent = `Welcome, ${AppState.currentUser.name}!`;
+    if (welcomeEmail) welcomeEmail.textContent = `${AppState.currentUser.role} • ${AppState.currentUser.email}`;
+  } else {
+    if (loggedInCard) loggedInCard.classList.add('hidden');
+    if (formsContainer) formsContainer.classList.remove('hidden');
+    switchAuthTab(AppState.authTab || 'signin');
+  }
+}
+
+
+function jumpToCurrentMonth() {
+  const now = new Date();
+  AppState.currentYear = now.getFullYear();
+  AppState.currentMonth = now.getMonth() + 1;
+  renderApp();
+  showToast(`Jumped to Current Month`, 'info');
+}
+
+// ==============================================================================
+// 4. CORE ATTENDANCE CALCULATION ENGINE
+// ==============================================================================
+
+function normalizeStatus(st) {
+  if (!st) return 'N/A';
+  const s = String(st).trim().toUpperCase();
+  if (s === 'H' || s === 'HOLIDAY' || s === 'HOL') return 'H';
+  if (s === 'P' || s === 'PRESENT') return 'P';
+  if (s === 'SL' || s === 'SICK' || s === 'SICK LEAVE') return 'SL';
+  if (s === 'CL' || s === 'CASUAL' || s === 'CASUAL LEAVE') return 'CL';
+  if (s === 'WL' || s === 'WELLNESS' || s === 'WELLNESS LEAVE') return 'WL';
+  if (s === 'LOP' || s === 'A' || s === 'ABSENT' || s === 'LOSS OF PAY') return 'LOP';
+  if (s === 'HLOP' || s === 'HALF LOP' || s === 'HALF DAY LOP' || s === 'HALF DAY - LOSS OF PAY') return 'HLOP';
+  if (s === 'HSL' || s === 'HALF SL' || s === 'HALF SICK LEAVE' || s === 'HALF DAY - SICK LEAVE' || s === 'HALF DAY SL') return 'HSL';
+  if (s === 'VIL' || s === 'VACATION') return 'VIL';
+  if (s === 'N/A' || s === 'NA' || s === 'UNMARKED') return 'N/A';
+  return s;
+}
+
+// CSS class names can't contain "/", so status badges use this instead of
+// the raw status string when building class attributes.
+function statusToCssClass(st) {
+  return String(st).replace('/', '-');
+}
+
+/**
+ * Calculates the final attendance status for an employee on a specific date.
+ * PRIORITY LOGIC (Strict):
+ * 1. Employee Vacation (VIL) -> OVERRIDES Sunday, Weekend, & Company Holiday!
+ * 2. Explicit Saved Attendance in Sheet (P, SL, LOP, VIL, H)
+ * 3. Company Holiday from Holidays sheet -> H
+ * 4. Sunday / Weekend -> H
+ * 5. Normal Working Day -> P
+ */
+function calculateAttendanceStatus(employeeId, dateKey, dayInfo) {
+  const empIdLower = employeeId.toLowerCase();
+
+  // 1. Check Employee Vacation (Highest Priority)
+  const activeVacation = AppState.vacations.find(v => {
+    return v.employeeId.toLowerCase() === empIdLower &&
+           dateKey >= v.startDate &&
+           dateKey <= v.endDate;
+  });
+
+  if (activeVacation) {
+    const lopDays = parseInt(activeVacation.lopDays || 0, 10);
+    let cellStatus = activeVacation.leaveType || 'VIL';
+
+    // If vacation has LOP days, the LAST lopDays of the range are LOP
+    if (lopDays > 0) {
+      // Calculate the LOP start date (count back lopDays from endDate)
+      const endParts = activeVacation.endDate.split('-');
+      const endDateObj = new Date(parseInt(endParts[0]), parseInt(endParts[1]) - 1, parseInt(endParts[2]));
+      const lopStartObj = new Date(endDateObj);
+      lopStartObj.setDate(lopStartObj.getDate() - lopDays + 1);
+      const lopStartKey = `${lopStartObj.getFullYear()}-${String(lopStartObj.getMonth()+1).padStart(2,'0')}-${String(lopStartObj.getDate()).padStart(2,'0')}`;
+
+      if (dateKey >= lopStartKey) {
+        cellStatus = 'LOP';
+      }
+    }
+
+    return {
+      status: cellStatus,
+      source: 'vacation',
+      isVacation: true,
+      description: `Vacation Period (${activeVacation.leaveType}${lopDays > 0 ? ` + ${lopDays} LOP` : ''})`
+    };
+  }
+
+  // 2. Check Explicit Attendance Record in Database
+  const explicitRecord = AppState.attendance.find(a => {
+    return a.employeeId.toLowerCase() === empIdLower && a.date === dateKey;
+  });
+
+  if (explicitRecord && explicitRecord.status) {
+    const norm = normalizeStatus(explicitRecord.status);
+    return {
+      status: norm,
+      source: 'explicit',
+      isCustom: true,
+      description: `Explicit Status (${norm})`
+    };
+  }
+
+  // 3. Check Company Holiday from Holidays Sheet
+  if (dayInfo.holidayName) {
+    return {
+      status: 'H',
+      source: 'holiday',
+      isHoliday: true,
+      description: `Company Holiday: ${dayInfo.holidayName}`
+    };
+  }
+
+  // 4. Check Sunday
+  if (dayInfo.isSunday) {
+    return {
+      status: 'H',
+      source: 'sunday',
+      isSunday: true,
+      description: 'Sunday Weekly Off'
+    };
+  }
+
+  // 5. No explicit record and not a Sunday/Holiday — leave unmarked until
+  // an admin actually records attendance for the day.
+  return {
+    status: 'N/A',
+    source: 'default',
+    description: 'Not Marked Yet'
+  };
+}
+
+/**
+ * Computes the month days structure
+ */
+function getMonthDays(year, month) {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const days = [];
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  // Index holidays for quick lookup
+  const holidayMap = {};
+  AppState.holidays.forEach(h => {
+    holidayMap[h.date] = h.holidayName;
+  });
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dayStr = String(d).padStart(2, '0');
+    const monthStr = String(month).padStart(2, '0');
+    const dateKey = `${year}-${monthStr}-${dayStr}`;
+    const dateObj = new Date(year, month - 1, d);
+    const dayOfWeek = dateObj.getDay();
+
+    days.push({
+      day: d,
+      date: dateKey,
+      dayName: dayNames[dayOfWeek],
+      isSunday: dayOfWeek === 0,
+      isSaturday: dayOfWeek === 6,
+      holidayName: holidayMap[dateKey] || null
+    });
+  }
+
+  return days;
+}
+
+// ==============================================================================
+// 5. RENDERING MODULES
+// ==============================================================================
+
+function renderApp() {
+  renderHeaderAuth();
+  updateMonthHeader();
+  renderLegend();
+  renderMonthlyOverview();
+
+  if (AppState.activeTab === 'home') {
+    renderHomeView();
+  } else if (AppState.activeTab === 'matrix') {
+    renderMatrix();
+  } else if (AppState.activeTab === 'employees') {
+    renderEmployeesTable();
+  } else if (AppState.activeTab === 'vacations') {
+    renderVacationsTable();
+  } else if (AppState.activeTab === 'holidays') {
+    renderHolidaysTable();
+  } else if (AppState.activeTab === 'reports') {
+    renderReports();
+  } else if (AppState.activeTab === 'yearly') {
+    renderYearlyTracker();
+  } else if (AppState.activeTab === 'settings') {
+    renderSettingsView();
+  }
+
+  updateBadges();
+}
+
+/**
+ * COMPANY MONTHLY OVERVIEW
+ * Shows, for the currently selected month: total calendar days, working
+ * days, company holidays (including Sundays), and current team strength.
+ */
+function renderMonthlyOverview() {
+  const bar = document.getElementById('monthlyOverviewBar');
+  if (!bar) return;
+
+  const monthDays = getMonthDays(AppState.currentYear, AppState.currentMonth);
+  const totalDays = monthDays.length;
+  const sundays = monthDays.filter(d => d.isSunday);
+  const namedHolidays = monthDays.filter(d => !!d.holidayName);
+  // "Company Holidays" for the overview = every non-working day, i.e. any
+  // Sunday OR any day explicitly marked as a company holiday (no double count).
+  const nonWorkingDays = monthDays.filter(d => d.isSunday || d.holidayName);
+  const workingDays = totalDays - nonWorkingDays.length;
+
+  const activeEmployees = AppState.employees.filter(e => e.status === 'Active');
+  const totalEmployees = AppState.employees.length;
+
+  const labelEl = document.getElementById('overviewMonthLabel');
+  if (labelEl) labelEl.textContent = `${getMonthName(AppState.currentMonth)} ${AppState.currentYear}`;
+
+  const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+
+  setText('ovTotalDays', totalDays);
+  setText('ovWorkingDays', workingDays);
+  setText('ovHolidays', nonWorkingDays.length);
+  setText('ovHolidaysBreakdown', `(${namedHolidays.length} holiday${namedHolidays.length === 1 ? '' : 's'} + ${sundays.length} Sunday${sundays.length === 1 ? '' : 's'})`);
+  setText('ovTeamStrength', activeEmployees.length);
+  setText('ovTeamStrengthSub', `${activeEmployees.length} active of ${totalEmployees} total`);
+}
+
+function updateMonthHeader() {
+  const monthName = getMonthName(AppState.currentMonth);
+  const text = `${monthName} ${AppState.currentYear}`;
+  document.getElementById('currentMonthDisplay').textContent = text;
+  document.getElementById('printMonthTitle').textContent = text;
+}
+
+function renderLegend() {
+  // Update metric counters on top
+  const monthDays = getMonthDays(AppState.currentYear, AppState.currentMonth);
+  const activeEmployees = AppState.employees.filter(e => e.status === 'Active');
+  
+  let totalP = 0;
+  let totalSL = 0;
+  let totalLOP = 0;
+  let totalVIL = 0;
+  let totalHol = 0;
+
+  activeEmployees.forEach(emp => {
+    monthDays.forEach(day => {
+      const res = calculateAttendanceStatus(emp.id, day.date, day);
+      const st = normalizeStatus(res.status);
+      if (st === 'P') totalP++;
+      else if (st === 'SL') totalSL++;
+      else if (st === 'LOP' || st === 'A') totalLOP++;
+      else if (st === 'VIL') totalVIL++;
+      else if (st === 'H') totalHol++;
+    });
+  });
+
+  const countElemP = document.getElementById('metricPresentCount');
+  const countElemSL = document.getElementById('metricSlCount');
+  const countElemLOP = document.getElementById('metricLopCount');
+  const countElemVIL = document.getElementById('metricVilCount');
+  const countElemHol = document.getElementById('metricHolidayCount');
+
+  if (countElemP) countElemP.textContent = totalP;
+  if (countElemSL) countElemSL.textContent = totalSL;
+  if (countElemLOP) countElemLOP.textContent = totalLOP;
+  if (countElemVIL) countElemVIL.textContent = totalVIL;
+  if (countElemHol) countElemHol.textContent = totalHol;
+}
+
+window.viewEmployeeReport = function(empId) {
+  AppState.selectedReportEmployeeId = empId;
+  switchTab('reports');
+};
+
+window.navigateReportEmployee = function(delta) {
+  const options = ['ALL', ...AppState.employees.map(e => e.id)];
+  let currentIndex = options.indexOf(AppState.selectedReportEmployeeId);
+  if (currentIndex === -1) currentIndex = 0;
+
+  let nextIndex = currentIndex + delta;
+  if (nextIndex < 0) nextIndex = options.length - 1;
+  if (nextIndex >= options.length) nextIndex = 0;
+
+  AppState.selectedReportEmployeeId = options[nextIndex];
+  renderReports();
+};
+
+function renderMatrix() {
+  const container = document.getElementById('matrixTableContainer');
+  if (!container) return;
+
+  const monthDays = getMonthDays(AppState.currentYear, AppState.currentMonth);
+  
+  // Filter employees
+  let employeesToRender = AppState.employees;
+  if (AppState.searchTerm) {
+    employeesToRender = employeesToRender.filter(e => 
+      e.name.toLowerCase().includes(AppState.searchTerm) || 
+      e.id.toLowerCase().includes(AppState.searchTerm)
+    );
+  }
+
+  // Build Table HTML
+  let html = `
+    <table class="attendance-table" id="matrixTable">
+      <thead>
+        <tr>
+          <th rowspan="2" class="col-emp-id">Emp ID</th>
+          <th rowspan="2" class="col-emp-name">Employee Name</th>
+  `;
+
+  // Row 1: Day Names
+  monthDays.forEach(d => {
+    const isSun = d.isSunday;
+    const isHol = !!d.holidayName;
+    let cls = isSun ? 'sunday-header' : (isHol ? 'holiday-header' : '');
+    html += `<th class="${cls}" title="${d.holidayName || (isSun ? 'Sunday' : d.dayName)}">${d.dayName}</th>`;
+  });
+
+  // Summary headers
+  html += `
+          <th rowspan="2" class="col-summary" title="Present Days">P</th>
+          <th rowspan="2" class="col-summary" title="Sick Leave">SL</th>
+          <th rowspan="2" class="col-summary" title="Casual Leave">CL</th>
+          <th rowspan="2" class="col-summary" title="Wellness Leave">WL</th>
+          <th rowspan="2" class="col-summary" title="Loss of Pay">LOP</th>
+          <th rowspan="2" class="col-summary" title="Half Day - Loss of Pay">HLOP</th>
+          <th rowspan="2" class="col-summary" title="Half Day - Sick Leave">HSL</th>
+          <th rowspan="2" class="col-summary" title="Vacation in Lieu">VIL</th>
+          <th rowspan="2" class="col-summary" title="Holiday / Sunday">H</th>
+        </tr>
+        <tr>
+  `;
+
+  // Row 2: Day Numbers (1 .. 31)
+  monthDays.forEach(d => {
+    const isSun = d.isSunday;
+    const isHol = !!d.holidayName;
+    let cls = isSun ? 'sunday-header' : (isHol ? 'holiday-header' : '');
+    html += `<th class="${cls}">${d.day}</th>`;
+  });
+
+  html += `
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  if (employeesToRender.length === 0) {
+    html += `
+      <tr>
+        <td colspan="${monthDays.length + 11}" style="text-align:center; padding:30px; color:var(--text-muted);">
+          No employees found matching your search.
+        </td>
+      </tr>
+    `;
+  }
+
+  // Daily totals accumulator
+  const dailyTotals = monthDays.map(() => createEmptyTally());
+
+  employeesToRender.forEach(emp => {
+    const empTally = createEmptyTally();
+
+    html += `
+      <tr data-emp-id="${emp.id}">
+        <td class="col-emp-id">
+          <a href="javascript:void(0)" onclick="viewEmployeeReport('${emp.id}')" title="View individual report for ${emp.name}" style="color:var(--primary); font-weight:700; text-decoration:none;">
+            ${emp.id}
+          </a>
+        </td>
+        <td class="col-emp-name" title="Click to view monthly report for ${emp.name}">
+          <a href="javascript:void(0)" onclick="viewEmployeeReport('${emp.id}')" style="color:inherit; text-decoration:none; display:flex; align-items:center; justify-content:space-between;">
+            <span>${emp.name}</span>
+            <span style="font-size:11px; opacity:0.6;" title="View Monthly Report">📊</span>
+          </a>
+        </td>
+    `;
+
+    monthDays.forEach((day, index) => {
+      const result = calculateAttendanceStatus(emp.id, day.date, day);
+      const st = normalizeStatus(result.status);
+
+      addToTally(empTally, st);
+      addToTally(dailyTotals[index], st);
+
+      let cellExtraClass = '';
+      if (day.isSunday) cellExtraClass += ' sunday-col';
+      if (day.holidayName) cellExtraClass += ' holiday-col';
+
+      html += `
+        <td class="${cellExtraClass}">
+          <div class="attendance-cell status-badge ${statusToCssClass(st)}" 
+               data-emp-id="${emp.id}" 
+               data-emp-name="${emp.name}" 
+               data-date="${day.date}" 
+               data-status="${st}"
+               title="${emp.name} (${emp.id}) | ${day.date}: ${st} - ${result.description}">
+            ${st}
+            ${result.isCustom ? '<span class="cell-dot-explicit" title="Manually saved"></span>' : ''}
+          </div>
+        </td>
+      `;
+    });
+
+    html += `
+        <td class="col-summary font-bold" style="color:var(--status-p-text);">${empTally.P}</td>
+        <td class="col-summary font-bold" style="color:var(--status-sl-text);">${empTally.SL}</td>
+        <td class="col-summary font-bold" style="color:var(--status-cl-text);">${empTally.CL}</td>
+        <td class="col-summary font-bold" style="color:var(--status-wl-text);">${empTally.WL}</td>
+        <td class="col-summary font-bold" style="color:var(--status-lop-text);">${empTally.LOP}</td>
+        <td class="col-summary font-bold" style="color:var(--status-hlop-text);">${empTally.HLOP}</td>
+        <td class="col-summary font-bold" style="color:var(--status-hsl-text);">${empTally.HSL}</td>
+        <td class="col-summary font-bold" style="color:var(--status-vil-text);">${empTally.VIL}</td>
+        <td class="col-summary font-bold" style="color:var(--status-hol-text);">${empTally.H}</td>
+      </tr>
+    `;
+  });
+
+  html += `
+      </tbody>
+      <tfoot>
+        <tr>
+          <td class="col-emp-id">Total</td>
+          <td class="col-emp-name">Present (P) Count</td>
+  `;
+
+  dailyTotals.forEach(dt => {
+    html += `<td>${dt.P}</td>`;
+  });
+
+  html += `
+          <td colspan="10" style="text-align:right; padding-right:12px; color:var(--text-muted);">
+            Active: ${AppState.employees.filter(e=>e.status==='Active').length}
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
+
+  container.innerHTML = html;
+
+  // Bind cell clicks for fast editing
+  container.querySelectorAll('.attendance-cell').forEach(cell => {
+    cell.addEventListener('click', (e) => {
+      const empId = cell.dataset.empId;
+      const empName = cell.dataset.empName;
+      const date = cell.dataset.date;
+      const currentStatus = cell.dataset.status;
+
+      openCellStatusModal(empId, empName, date, currentStatus);
+    });
+  });
+}
+
+function renderEmployeesTable() {
+  const tbody = document.getElementById('employeesTableBody');
+  if (!tbody) return;
+
+  let employees = AppState.employees;
+  if (AppState.searchTerm) {
+    employees = employees.filter(e => 
+      e.name.toLowerCase().includes(AppState.searchTerm) || 
+      e.id.toLowerCase().includes(AppState.searchTerm)
+    );
+  }
+
+  if (employees.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted" style="padding:24px;">No employees registered.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = employees.map(emp => `
+    <tr>
+      <td class="font-bold text-primary">${emp.id}</td>
+      <td><strong>${emp.name}</strong></td>
+      <td>
+        <span class="${emp.status === 'Active' ? 'pill-active' : 'pill-inactive'}">
+          ${emp.status}
+        </span>
+      </td>
+      <td>${emp.createdAt || '-'}</td>
+      <td class="text-right">
+        <button class="btn btn-secondary btn-sm" onclick="openEditEmployeeModal('${emp.id}')">Edit</button>
+        <button class="btn ${emp.status === 'Active' ? 'btn-secondary' : 'btn-success'} btn-sm" 
+                onclick="toggleEmployeeStatus('${emp.id}')">
+          ${emp.status === 'Active' ? 'Deactivate' : 'Activate'}
+        </button>
+        <button class="btn btn-danger btn-sm" onclick="deleteEmployee('${emp.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function renderVacationsTable() {
+  const tbody = document.getElementById('vacationsTableBody');
+  if (!tbody) return;
+
+  if (AppState.vacations.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" class="text-center text-muted" style="padding:24px;">No vacation periods configured.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = AppState.vacations.map((vac, idx) => {
+    const totalDays = calculateDaysBetween(vac.startDate, vac.endDate);
+    const lopDays = parseInt(vac.lopDays || 0, 10);
+    const vilDays = totalDays - lopDays;
+    const leaveType = vac.leaveType || 'VIL';
+    const returnDateDisplay = vac.returnDate ? formatDateForDisplay(vac.returnDate) : '—';
+    return `
+      <tr>
+        <td class="font-bold text-primary">${vac.employeeId}</td>
+        <td><strong>${vac.employeeName || getEmployeeNameById(vac.employeeId)}</strong></td>
+        <td>
+          <span class="status-badge ${statusToCssClass(leaveType)}">${leaveType}</span>
+          ${lopDays > 0 ? `<span class="status-badge LOP" style="margin-left:4px;">+${lopDays}LOP</span>` : ''}
+        </td>
+        <td>${formatDateForDisplay(vac.startDate)}</td>
+        <td>${formatDateForDisplay(vac.endDate)}</td>
+        <td><span class="pill-active">${totalDays} days</span></td>
+        <td><span class="pill-active" style="background:var(--status-vil-bg,#ede9fe);color:var(--status-vil-text,#6d28d9);">${vilDays}d</span></td>
+        <td>${lopDays > 0 ? `<span class="status-badge LOP">${lopDays}d</span>` : '<span style="color:var(--text-muted);">—</span>'}</td>
+        <td style="font-size:12px;">${returnDateDisplay}</td>
+        <td class="text-right" style="white-space:nowrap;">
+          <button class="btn btn-secondary btn-sm" style="margin-right:6px;" onclick="openEditVacationModal('${vac.employeeId}', '${vac.startDate}')">✏️ Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteVacationRecord('${vac.employeeId}', '${vac.startDate}')">Delete</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderHolidaysTable() {
+  const tbody = document.getElementById('holidaysTableBody');
+  if (!tbody) return;
+
+  if (AppState.holidays.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" class="text-center text-muted" style="padding:24px;">No company holidays configured.</td></tr>`;
+    return;
+  }
+
+  // Sort holidays by date
+  const sortedHolidays = [...AppState.holidays].sort((a,b) => a.date.localeCompare(b.date));
+
+  tbody.innerHTML = sortedHolidays.map(hol => `
+    <tr>
+      <td class="font-bold">${formatDateForDisplay(hol.date)}</td>
+      <td><strong>${hol.holidayName}</strong></td>
+      <td>${hol.createdAt || '-'}</td>
+      <td class="text-right">
+        <button class="btn btn-danger btn-sm" onclick="deleteHolidayRecord('${hol.date}')">Delete</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function renderReports() {
+  const container = document.getElementById('reportsContainer');
+  if (!container) return;
+
+  const selectFilter = document.getElementById('reportEmployeeFilter');
+  if (selectFilter) {
+    // Preserve current selection or default to ALL
+    let optionsHtml = `<option value="ALL">🏢 All Employees (Consolidated Summary)</option>`;
+    
+    if (AppState.employees.length > 0) {
+      optionsHtml += `<optgroup label="Active Employees">`;
+      AppState.employees.filter(e => e.status === 'Active').forEach(e => {
+        optionsHtml += `<option value="${e.id}">${e.id} - ${e.name} (Active)</option>`;
+      });
+      optionsHtml += `</optgroup>`;
+
+      const inactives = AppState.employees.filter(e => e.status !== 'Active');
+      if (inactives.length > 0) {
+        optionsHtml += `<optgroup label="Inactive Employees">`;
+        inactives.forEach(e => {
+          optionsHtml += `<option value="${e.id}">${e.id} - ${e.name} (Inactive)</option>`;
+        });
+        optionsHtml += `</optgroup>`;
+      }
+    }
+    
+    selectFilter.innerHTML = optionsHtml;
+    selectFilter.value = AppState.selectedReportEmployeeId || 'ALL';
+  }
+
+  const monthDays = getMonthDays(AppState.currentYear, AppState.currentMonth);
+  const totalDays = monthDays.length;
+  const monthName = getMonthName(AppState.currentMonth);
+
+  // CASE 1: INDIVIDUAL EMPLOYEE MONTHLY REPORT
+  if (AppState.selectedReportEmployeeId && AppState.selectedReportEmployeeId !== 'ALL') {
+    const emp = AppState.employees.find(e => e.id.toLowerCase() === AppState.selectedReportEmployeeId.toLowerCase());
+    if (!emp) {
+      AppState.selectedReportEmployeeId = 'ALL';
+      renderReports();
+      return;
+    }
+
+    const tally = createEmptyTally();
+    const dailyRecords = monthDays.map(day => {
+      const res = calculateAttendanceStatus(emp.id, day.date, day);
+      const st = normalizeStatus(res.status);
+      addToTally(tally, st);
+      return { day, res, st };
+    });
+
+    const payableDays = computePayableDays(tally);
+    const rate = totalDays > 0 ? ((payableDays / totalDays) * 100).toFixed(1) : '0.0';
+    const presentRate = totalDays > 0 ? ((tally.P / totalDays) * 100).toFixed(1) : '0.0';
+    const initials = emp.name.split(' ').map(n => n[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || emp.id;
+
+    // Check if employee has active vacation this month
+    const empVacations = AppState.vacations.filter(v => v.employeeId.toLowerCase() === emp.id.toLowerCase());
+
+    let html = `
+      <!-- Employee Profile Banner -->
+      <div class="employee-profile-card">
+        <div class="emp-profile-left">
+          <div class="emp-avatar">${initials}</div>
+          <div class="emp-profile-details">
+            <h2>${emp.name}</h2>
+            <p>
+              <span><strong>Employee ID:</strong> ${emp.id}</span>
+              <span>•</span>
+              <span class="${emp.status === 'Active' ? 'pill-active' : 'pill-inactive'}">${emp.status}</span>
+              <span>•</span>
+              <span><strong>Report Period:</strong> ${monthName} ${AppState.currentYear}</span>
+            </p>
+            ${empVacations.length > 0 ? `
+              <div style="font-size:12px; margin-top:6px; opacity:0.95; background:rgba(255,255,255,0.18); padding:4px 10px; border-radius:4px; display:inline-block;">
+                🏖️ <strong>Vacation Configured:</strong> ${empVacations.map(v => {
+                  const total = calculateDaysBetween(v.startDate, v.endDate);
+                  const lop = parseInt(v.lopDays || 0, 10);
+                  const vil = total - lop;
+                  let info = `${formatDateForDisplay(v.startDate)} to ${formatDateForDisplay(v.endDate)} (${v.leaveType}, ${vil}d VIL`;
+                  if (lop > 0) info += ` + ${lop}d LOP`;
+                  if (v.returnDate) info += `, returns ${formatDateForDisplay(v.returnDate)}`;
+                  info += ')';
+                  return info;
+                }).join(', ')}
+              </div>
+            ` : ''}
+          </div>
+        </div>
+      </div>
+
+      <!-- KPI Metrics Row -->
+      <div class="individual-kpis">
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-p-text);">${tally.P}</div>
+          <div class="kpi-lbl">Present (P)</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-sl-text);">${tally.SL}</div>
+          <div class="kpi-lbl">Sick Leave (SL)</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-cl-text);">${tally.CL}</div>
+          <div class="kpi-lbl">Casual Leave (CL)</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-wl-text);">${tally.WL}</div>
+          <div class="kpi-lbl">Wellness Leave (WL)</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-lop-text);">${tally.LOP}</div>
+          <div class="kpi-lbl">Loss of Pay (LOP)</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-hlop-text);">${tally.HLOP}</div>
+          <div class="kpi-lbl">Half-Day LOP</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-hsl-text);">${tally.HSL}</div>
+          <div class="kpi-lbl">Half-Day SL</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-vil-text);">${tally.VIL}</div>
+          <div class="kpi-lbl">Vacation (VIL)</div>
+        </div>
+        <div class="kpi-chip">
+          <div class="kpi-val" style="color:var(--status-hol-text);">${tally.H}</div>
+          <div class="kpi-lbl">Holiday / Sun (H)</div>
+        </div>
+      </div>
+
+      <!-- Day-by-Day Detailed Timesheet Table -->
+      <div class="view-card">
+        <div class="card-header-flex">
+          <div class="card-title">
+            <h3>Daily Timesheet & Attendance Register</h3>
+            <p>Full day-by-day activity breakdown for ${emp.name} (${emp.id}) in ${monthName} ${AppState.currentYear}</p>
+          </div>
+          <div style="font-size:12px; color:var(--text-muted);">
+            Total Calendar Days: <strong>${totalDays}</strong>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="timesheet-table">
+            <thead>
+              <tr>
+                <th style="width:120px;">Date</th>
+                <th style="width:130px;">Day</th>
+                <th style="width:110px;">Status</th>
+                <th>Source & Priority Reason</th>
+                <th class="text-right no-print" style="width:100px;">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+    `;
+
+    dailyRecords.forEach(({ day, res, st }) => {
+      let rowClass = '';
+      if (st === 'VIL') rowClass = 'vacation-row';
+      else if (day.isSunday) rowClass = 'sunday-row';
+      else if (day.holidayName) rowClass = 'holiday-row';
+
+      html += `
+        <tr class="${rowClass}">
+          <td class="font-bold">${formatDateForDisplay(day.date)}</td>
+          <td>
+            <strong>${day.dayName}</strong>
+            ${day.isSunday ? '<span style="font-size:10px; color:#DC2626; margin-left:4px;">(Weekly Off)</span>' : ''}
+          </td>
+          <td>
+            <span class="status-badge ${statusToCssClass(st)}">${st}</span>
+          </td>
+          <td>
+            <span style="font-size:12px; color:var(--text-main);">
+              ${res.description}
+            </span>
+            ${res.isCustom ? '<span class="cell-dot-explicit" style="position:static; display:inline-block; margin-left:4px; vertical-align:middle;" title="Manually edited"></span>' : ''}
+          </td>
+          <td class="text-right no-print">
+            <button class="btn btn-secondary btn-sm" onclick="openCellStatusModal('${emp.id}', '${emp.name}', '${day.date}', '${st}')">
+              Edit
+            </button>
+          </td>
+        </tr>
+      `;
+    });
+
+    html += `
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Official Sign-off Box for Print / HR -->
+        <div class="signature-box">
+          <div>
+            <div style="font-size:12px; color:var(--text-main); font-weight:600;">Employee Acknowledgment:</div>
+            <div class="signature-line">
+              Signature of ${emp.name} & Date
+            </div>
+          </div>
+          <div>
+            <div style="font-size:12px; color:var(--text-main); font-weight:600;">Authorized HR / Supervisor:</div>
+            <div class="signature-line">
+              Manager / HR Signature & Stamp
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    container.innerHTML = html;
+    return;
+  }
+
+  // CASE 2: CONSOLIDATED ALL-EMPLOYEES REPORT
+  let html = `
+    <div class="view-card">
+      <div class="card-header-flex">
+        <div class="card-title">
+          <h3>Monthly Attendance & Payroll Summary (All Employees)</h3>
+          <p>Consolidated statistics for ${monthName} ${AppState.currentYear}. Select any employee above to view their individual day-by-day timesheet report.</p>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Emp ID</th>
+              <th>Employee Name</th>
+              <th>Status</th>
+              <th>Total Days</th>
+              <th>Present (P)</th>
+              <th>Sick (SL)</th>
+              <th>Casual (CL)</th>
+              <th>Wellness (WL)</th>
+              <th>LOP</th>
+              <th>Half LOP</th>
+              <th>Half SL</th>
+              <th>Vacation (VIL)</th>
+              <th>Holiday (H)</th>
+              <th>Attendance Rate</th>
+              <th class="text-right no-print">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+  `;
+
+  AppState.employees.forEach(emp => {
+    const tally = createEmptyTally();
+
+    monthDays.forEach(day => {
+      const res = calculateAttendanceStatus(emp.id, day.date, day);
+      const st = normalizeStatus(res.status);
+      addToTally(tally, st);
+    });
+
+    const payable = computePayableDays(tally);
+    const rate = totalDays > 0 ? ((payable / totalDays) * 100).toFixed(1) : '0.0';
+
+    html += `
+      <tr>
+        <td class="font-bold text-primary">${emp.id}</td>
+        <td><strong>${emp.name}</strong></td>
+        <td><span class="${emp.status === 'Active' ? 'pill-active' : 'pill-inactive'}">${emp.status}</span></td>
+        <td>${totalDays}</td>
+        <td><span class="status-badge P">${tally.P}</span></td>
+        <td><span class="status-badge SL">${tally.SL}</span></td>
+        <td><span class="status-badge CL">${tally.CL}</span></td>
+        <td><span class="status-badge WL">${tally.WL}</span></td>
+        <td><span class="status-badge LOP">${tally.LOP}</span></td>
+        <td><span class="status-badge HLOP">${tally.HLOP}</span></td>
+        <td><span class="status-badge HSL">${tally.HSL}</span></td>
+        <td><span class="status-badge VIL">${tally.VIL}</span></td>
+        <td><span class="status-badge H">${tally.H}</span></td>
+        <td>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div style="flex:1; background:#E2E8F0; height:6px; border-radius:3px; overflow:hidden; min-width:60px;">
+              <div style="background:var(--primary); width:${rate}%; height:100%;"></div>
+            </div>
+            <span style="font-weight:600; font-size:12px;">${rate}%</span>
+          </div>
+        </td>
+        <td class="text-right no-print">
+          <button class="btn btn-secondary btn-sm" onclick="viewEmployeeReport('${emp.id}')">
+            📊 View Timesheet
+          </button>
+        </td>
+      </tr>
+    `;
+  });
+
+  html += `
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  container.innerHTML = html;
+}
+
+function printEmployeeReport() {
+  window.print();
+}
+
+// ==============================================================================
+// YEARLY LEAVE TRACKER
+// For a chosen employee + year, shows total count AND the exact list of
+// dates (with day-of-week) for every leave type (SL, CL, WL, LOP, HLOP,
+// HSL, VIL) taken across the whole year.
+// ==============================================================================
+
+function computeYearlyLeaveBreakdown(employeeId, year) {
+  const breakdown = {};
+  LEAVE_TYPE_ORDER.forEach(code => { breakdown[code] = []; });
+
+  for (let m = 1; m <= 12; m++) {
+    const days = getMonthDays(year, m);
+    days.forEach(day => {
+      const res = calculateAttendanceStatus(employeeId, day.date, day);
+      const st = normalizeStatus(res.status);
+      if (STATUS_META[st] && STATUS_META[st].isLeave) {
+        if (!breakdown[st]) breakdown[st] = [];
+        breakdown[st].push({ date: day.date, dayName: day.dayName });
+      }
+    });
+  }
+  return breakdown;
+}
+
+function renderYearlyTracker() {
+  const empSelect = document.getElementById('yearlyEmployeeFilter');
+  const yearInput = document.getElementById('yearlyYearInput');
+  const container = document.getElementById('yearlyTrackerContainer');
+  if (!container) return;
+
+  // Populate employee dropdown
+  if (empSelect) {
+    if (!AppState.selectedYearlyEmployeeId && AppState.employees.length > 0) {
+      AppState.selectedYearlyEmployeeId = AppState.employees[0].id;
+    }
+    empSelect.innerHTML = AppState.employees.map(e =>
+      `<option value="${e.id}">${e.id} - ${e.name}${e.status !== 'Active' ? ' (Inactive)' : ''}</option>`
+    ).join('');
+    if (AppState.selectedYearlyEmployeeId) {
+      empSelect.value = AppState.selectedYearlyEmployeeId;
+    }
+  }
+
+  if (yearInput) {
+    if (!AppState.selectedYearlyYear) AppState.selectedYearlyYear = AppState.currentYear;
+    yearInput.value = AppState.selectedYearlyYear;
+  }
+
+  const emp = AppState.employees.find(e => e.id === AppState.selectedYearlyEmployeeId);
+  if (!emp) {
+    container.innerHTML = `
+      <div class="view-card">
+        <p class="text-center text-muted" style="padding:24px;">Add an employee first to view their yearly leave history.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const year = AppState.selectedYearlyYear || AppState.currentYear;
+  const breakdown = computeYearlyLeaveBreakdown(emp.id, year);
+
+  const initials = emp.name.split(' ').map(n => n[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || emp.id;
+  const totalLeaveDays = LEAVE_TYPE_ORDER.reduce((sum, code) => sum + (breakdown[code] ? breakdown[code].length : 0), 0);
+
+  let html = `
+    <div class="employee-profile-card">
+      <div class="emp-profile-left">
+        <div class="emp-avatar">${initials}</div>
+        <div class="emp-profile-details">
+          <h2>${emp.name}</h2>
+          <p>
+            <span><strong>Employee ID:</strong> ${emp.id}</span>
+            <span>•</span>
+            <span><strong>Year:</strong> ${year}</span>
+            <span>•</span>
+            <span><strong>Total Leave Days Taken:</strong> ${totalLeaveDays}</span>
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="yearly-summary-grid">
+  `;
+
+  LEAVE_TYPE_ORDER.forEach(code => {
+    const meta = STATUS_META[code];
+    const dates = breakdown[code] || [];
+    html += `
+      <div class="yearly-leave-card">
+        <div class="yearly-leave-header">
+          <span class="status-badge ${statusToCssClass(code)}">${code}</span>
+          <div class="yearly-leave-title">
+            <div class="yearly-leave-name">${meta.label}</div>
+            <div class="yearly-leave-count">${dates.length} day${dates.length === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+        ${dates.length > 0 ? `
+          <details class="yearly-leave-details">
+            <summary>View dates</summary>
+            <div class="yearly-date-list">
+              ${dates.map(d => `<span class="yearly-date-chip">${formatDateForDisplay(d.date)} <em>(${d.dayName})</em></span>`).join('')}
+            </div>
+          </details>
+        ` : `<p class="yearly-leave-empty">No ${meta.label.toLowerCase()} recorded in ${year}.</p>`}
+      </div>
+    `;
+  });
+
+  html += `</div>`;
+  container.innerHTML = html;
+}
+
+function exportEmployeeCsv() {
+  if (!AppState.selectedReportEmployeeId || AppState.selectedReportEmployeeId === 'ALL') {
+    exportToCsv();
+    return;
+  }
+
+  const emp = AppState.employees.find(e => e.id.toLowerCase() === AppState.selectedReportEmployeeId.toLowerCase());
+  if (!emp) {
+    exportToCsv();
+    return;
+  }
+
+  const monthDays = getMonthDays(AppState.currentYear, AppState.currentMonth);
+  const monthName = getMonthName(AppState.currentMonth);
+
+  const headerRow = [
+    'Date',
+    'Day',
+    'Employee ID',
+    'Employee Name',
+    'Status',
+    'Attendance Classification',
+    'Source / Priority Reason'
+  ];
+
+  const rows = [headerRow];
+  const tally = createEmptyTally();
+
+  monthDays.forEach(day => {
+    const res = calculateAttendanceStatus(emp.id, day.date, day);
+    const st = normalizeStatus(res.status);
+    addToTally(tally, st);
+
+    rows.push([
+      `"${formatDateForDisplay(day.date)}"`,
+      `"${day.dayName}"`,
+      `"${emp.id}"`,
+      `"${emp.name}"`,
+      `"${st}"`,
+      `"${(STATUS_META[st] && STATUS_META[st].label) || st}"`,
+      `"${res.description.replace(/"/g, '""')}"`
+    ]);
+  });
+
+  const totalDays = monthDays.length;
+  const payable = computePayableDays(tally);
+  const rate = totalDays > 0 ? ((payable / totalDays) * 100).toFixed(1) : '0.0';
+
+  rows.push([]);
+  rows.push(['--- SUMMARY METRICS ---']);
+  rows.push(['Total Calendar Days', totalDays]);
+  rows.push(['Present Days (P)', tally.P]);
+  rows.push(['Sick Leave (SL)', tally.SL]);
+  rows.push(['Casual Leave (CL)', tally.CL]);
+  rows.push(['Wellness Leave (WL)', tally.WL]);
+  rows.push(['Loss of Pay (LOP)', tally.LOP]);
+  rows.push(['Half Day - Loss of Pay (HLOP)', tally.HLOP]);
+  rows.push(['Half Day - Sick Leave (HSL)', tally.HSL]);
+  rows.push(['Vacation (VIL)', tally.VIL]);
+  rows.push(['Holidays & Sundays (H)', tally.H]);
+  rows.push(['Total Payable Days', payable]);
+  rows.push(['Attendance Rate', `${rate}%`]);
+
+  const csvContent = 'data:text/csv;charset=utf-8,' + rows.map(e => e.join(',')).join('\n');
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement('a');
+  link.setAttribute('href', encodedUri);
+  link.setAttribute('download', `Timesheet_${emp.id}_${emp.name.replace(/\s+/g, '_')}_${monthName}_${AppState.currentYear}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  showToast(`Exported monthly timesheet for ${emp.name} (${emp.id}) to CSV.`, 'success');
+}
+
+function renderSettingsView() {
+  const urlInput = document.getElementById('gasApiUrlInput');
+  if (urlInput) {
+    urlInput.value = AppState.apiUrl || '';
+  }
+}
+
+function updateBadges() {
+  const empBadge = document.getElementById('empCountBadge');
+  const vacBadge = document.getElementById('vacCountBadge');
+  const holBadge = document.getElementById('holCountBadge');
+
+  if (empBadge) empBadge.textContent = AppState.employees.length;
+  if (vacBadge) vacBadge.textContent = AppState.vacations.length;
+  if (holBadge) holBadge.textContent = AppState.holidays.length;
+}
+
+function updateConnectionBadge(connected, text) {
+  const badge = document.getElementById('connectionBadge');
+  if (!badge) return;
+
+  badge.className = `connection-badge ${connected ? 'connected' : (AppState.apiUrl ? 'error' : 'demo')}`;
+  badge.innerHTML = `<span class="pulse-dot"></span> ${text || (connected ? 'Google Apps Script Live' : (AppState.apiUrl ? 'Connection Error' : 'Local Demo Mode'))}`;
+}
+
+// ==============================================================================
+// 6. MODAL & ATTENDANCE ACTIONS
+// ==============================================================================
+
+function openCellStatusModal(empId, empName, date, currentStatus) {
+  AppState.activeCellTarget = { employeeId: empId, employeeName: empName, date: date, currentStatus: currentStatus };
+
+  document.getElementById('cellModalEmpName').textContent = `${empName} (${empId})`;
+  document.getElementById('cellModalDate').textContent = formatDateForDisplay(date);
+
+  // Highlight active status button
+  document.querySelectorAll('.status-choice-btn').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.status === currentStatus);
+  });
+
+  openModal('cellStatusModal');
+}
+
+async function applyCellStatus(status) {
+  if (!AppState.activeCellTarget) return;
+
+  const { employeeId, employeeName, date } = AppState.activeCellTarget;
+  closeAllModals();
+
+  if (status === 'CLEAR') {
+    // Remove explicit attendance record locally
+    AppState.attendance = AppState.attendance.filter(a => !(a.employeeId.toLowerCase() === employeeId.toLowerCase() && a.date === date));
+    saveLocalData();
+    showToast(`Cleared manual status for ${employeeId} on ${date}`, 'success');
+
+    // Sync deletion to Google Sheet
+    if (AppState.apiUrl) {
+      sendGasRequest('clearAttendance', {
+        date: date,
+        employeeId: employeeId
+      }).catch(err => console.error('Background GAS clear sync error:', err));
+    }
+  } else {
+    // Update or insert record
+    const existingIndex = AppState.attendance.findIndex(a => a.employeeId.toLowerCase() === employeeId.toLowerCase() && a.date === date);
+    const nowStr = formatDateTimeNow();
+
+    if (existingIndex >= 0) {
+      AppState.attendance[existingIndex].status = status;
+      AppState.attendance[existingIndex].updatedAt = nowStr;
+    } else {
+      AppState.attendance.push({
+        date: date,
+        employeeId: employeeId,
+        employeeName: employeeName,
+        status: status,
+        updatedAt: nowStr
+      });
+    }
+
+    saveLocalData();
+    showToast(`Marked ${employeeName} as ${status} on ${formatDateForDisplay(date)}`, 'success');
+
+    // Sync to Google Apps Script if connected
+    if (AppState.apiUrl) {
+      sendGasRequest('updateAttendance', {
+        date: date,
+        employeeId: employeeId,
+        employeeName: employeeName,
+        status: status
+      }).catch(err => console.error('Background GAS sync error:', err));
+    }
+  }
+
+  renderApp();
+}
+
+function openBulkMarkModal() {
+  const selectEmp = document.getElementById('bulkEmployeeSelect');
+  if (selectEmp) {
+    selectEmp.innerHTML = `
+      <option value="ALL_ACTIVE">All Active Employees (${AppState.employees.filter(e=>e.status==='Active').length})</option>
+      ${AppState.employees.map(e => `<option value="${e.id}">${e.name} (${e.id})</option>`).join('')}
+    `;
+  }
+
+  // Default date to today or 1st of active month
+  const bulkDateInput = document.getElementById('bulkDateInput');
+  if (bulkDateInput) {
+    const dayStr = String(new Date().getDate()).padStart(2, '0');
+    const mStr = String(AppState.currentMonth).padStart(2, '0');
+    bulkDateInput.value = `${AppState.currentYear}-${mStr}-${dayStr}`;
+  }
+
+  openModal('bulkMarkModal');
+}
+
+async function handleBulkMarkFormSubmit(e) {
+  e.preventDefault();
+  const date = document.getElementById('bulkDateInput').value;
+  const status = document.getElementById('bulkStatusSelect').value;
+  const target = document.getElementById('bulkEmployeeSelect').value;
+
+  if (!date || !status) {
+    showToast('Please select a valid date and status.', 'error');
+    return;
+  }
+
+  let targets = [];
+  if (target === 'ALL_ACTIVE') {
+    targets = AppState.employees.filter(e => e.status === 'Active');
+  } else {
+    const emp = AppState.employees.find(e => e.id === target);
+    if (emp) targets = [emp];
+  }
+
+  const updates = [];
+  const nowStr = formatDateTimeNow();
+
+  targets.forEach(emp => {
+    // Avoid overriding active vacations if status is not vacation
+    const activeVacation = AppState.vacations.find(v => v.employeeId.toLowerCase() === emp.id.toLowerCase() && date >= v.startDate && date <= v.endDate);
+    if (activeVacation && status !== activeVacation.leaveType) {
+      // Vacation takes priority, skipped from normal overwrite
+      return;
+    }
+
+    const existingIndex = AppState.attendance.findIndex(a => a.employeeId.toLowerCase() === emp.id.toLowerCase() && a.date === date);
+    if (existingIndex >= 0) {
+      AppState.attendance[existingIndex].status = status;
+      AppState.attendance[existingIndex].updatedAt = nowStr;
+    } else {
+      AppState.attendance.push({
+        date: date,
+        employeeId: emp.id,
+        employeeName: emp.name,
+        status: status,
+        updatedAt: nowStr
+      });
+    }
+
+    updates.push({
+      date: date,
+      employeeId: emp.id,
+      employeeName: emp.name,
+      status: status
+    });
+  });
+
+  saveLocalData();
+  closeAllModals();
+  renderApp();
+  showToast(`Bulk marked ${updates.length} employees as ${status} on ${formatDateForDisplay(date)}`, 'success');
+
+  if (AppState.apiUrl && updates.length > 0) {
+    sendGasRequest('bulkUpdateAttendance', { updates: updates })
+      .catch(err => console.error('Bulk update GAS sync error:', err));
+  }
+}
+
+// ==============================================================================
+// 7. EMPLOYEE MANAGEMENT
+// ==============================================================================
+
+window.openAddEmployeeModal = function() {
+  document.getElementById('employeeModalTitle').textContent = 'Add New Employee';
+  document.getElementById('empFormId').value = '';
+  document.getElementById('empFormId').readOnly = false;
+  document.getElementById('empFormName').value = '';
+  document.getElementById('empFormStatus').value = 'Active';
+  openModal('employeeModal');
+};
+
+window.openEditEmployeeModal = function(id) {
+  const emp = AppState.employees.find(e => e.id === id);
+  if (!emp) return;
+
+  document.getElementById('employeeModalTitle').textContent = 'Edit Employee';
+  document.getElementById('empFormId').value = emp.id;
+  document.getElementById('empFormId').readOnly = true;
+  document.getElementById('empFormName').value = emp.name;
+  document.getElementById('empFormStatus').value = emp.status;
+  openModal('employeeModal');
+};
+
+async function handleEmployeeFormSubmit(e) {
+  e.preventDefault();
+  const id = document.getElementById('empFormId').value.trim().toUpperCase();
+  const name = document.getElementById('empFormName').value.trim();
+  const status = document.getElementById('empFormStatus').value;
+  const isEdit = document.getElementById('empFormId').readOnly;
+
+  if (!id || !name) {
+    showToast('Employee ID and Name are required.', 'error');
+    return;
+  }
+
+  if (isEdit) {
+    const idx = AppState.employees.findIndex(e => e.id === id);
+    if (idx >= 0) {
+      AppState.employees[idx].name = name;
+      AppState.employees[idx].status = status;
+      saveLocalData();
+      showToast(`Employee ${name} (${id}) updated successfully.`, 'success');
+      
+      if (AppState.apiUrl) {
+        sendGasRequest('editEmployee', { id, name, status }).catch(console.error);
+      }
+    }
+  } else {
+    // Check duplicate
+    if (AppState.employees.some(e => e.id === id)) {
+      showToast(`Employee ID ${id} already exists.`, 'error');
+      return;
+    }
+
+    const newEmp = { id, name, status, createdAt: formatDateKey(new Date()) };
+    AppState.employees.push(newEmp);
+    saveLocalData();
+    showToast(`Employee ${name} (${id}) added successfully.`, 'success');
+
+    if (AppState.apiUrl) {
+      sendGasRequest('addEmployee', newEmp).catch(console.error);
+    }
+  }
+
+  closeAllModals();
+  renderApp();
+}
+
+window.toggleEmployeeStatus = async function(id) {
+  const emp = AppState.employees.find(e => e.id === id);
+  if (!emp) return;
+
+  const newStatus = emp.status === 'Active' ? 'Inactive' : 'Active';
+  emp.status = newStatus;
+  saveLocalData();
+  renderApp();
+  showToast(`Employee ${emp.name} marked as ${newStatus}.`, 'success');
+
+  if (AppState.apiUrl) {
+    sendGasRequest('deactivateEmployee', { id: id, status: newStatus }).catch(console.error);
+  }
+};
+
+window.deleteEmployee = async function(id) {
+  const emp = AppState.employees.find(e => e.id === id);
+  if (!emp) return;
+
+  const confirmed = window.confirm(`Permanently delete ${emp.name} (${id})? This removes them from the Employees list. Their past attendance history stays on record. This cannot be undone.`);
+  if (!confirmed) return;
+
+  AppState.employees = AppState.employees.filter(e => e.id !== id);
+  saveLocalData();
+  renderApp();
+  showToast(`Employee ${emp.name} deleted.`, 'success');
+
+  if (AppState.apiUrl) {
+    try {
+      const result = await sendGasRequest('deleteEmployee', { id: id });
+      if (!result || !result.success) {
+        showToast(result?.message || 'Could not delete employee from the Sheet.', 'error');
+      }
+    } catch (err) {
+      showToast(`Delete failed to sync: ${err.message}`, 'error');
+    }
+  }
+};
+
+// ==============================================================================
+// 8. VACATION MANAGEMENT (RULE 1 PRIORITY)
+// ==============================================================================
+
+// Tracks which vacation is being edited (null = add mode)
+let _vacationEditKey = null; // "employeeId|startDate"
+
+function updateVacationSummaryPreview() {
+  const preview = document.getElementById('vacationSummaryPreview');
+  if (!preview) return;
+  const start = document.getElementById('vacationStartInput')?.value;
+  const end = document.getElementById('vacationEndInput')?.value;
+  const lop = parseInt(document.getElementById('vacationLopDaysInput')?.value || '0', 10) || 0;
+
+  if (!start || !end || start > end) { preview.style.display = 'none'; return; }
+
+  const total = calculateDaysBetween(start, end);
+  const vil = Math.max(0, total - lop);
+  const lopCapped = Math.min(lop, total);
+
+  let html = `
+    <div style="display:flex; gap:18px; flex-wrap:wrap; font-size:13px;">
+      <div><span style="opacity:0.6;">📅 Total</span> &nbsp;<strong style="font-size:15px;">${total} days</strong></div>
+      <div style="color:var(--status-vil-text,#6d28d9);"><span style="opacity:0.7;">🏖️ VIL</span> &nbsp;<strong style="font-size:15px;">${vil} days</strong></div>
+      ${lopCapped > 0 ? `<div style="color:var(--status-lop-text,#dc2626);"><span style="opacity:0.7;">⚠️ LOP</span> &nbsp;<strong style="font-size:15px;">${lopCapped} days</strong></div>` : ''}
+    </div>
+  `;
+  preview.innerHTML = html;
+  preview.style.display = 'block';
+}
+
+window.openAddVacationModal = function() {
+  _vacationEditKey = null;
+  document.getElementById('vacationModalTitle').textContent = 'Record Employee Vacation';
+  document.getElementById('vacationSubmitBtn').textContent = 'Save Vacation';
+  document.getElementById('vacationEmpSelect').disabled = false;
+
+  const select = document.getElementById('vacationEmpSelect');
+  if (select) {
+    select.innerHTML = AppState.employees.map(e => `<option value="${e.id}">${e.name} (${e.id})</option>`).join('');
+  }
+
+  // Pre-fill dates for convenient entry
+  const mStr = String(AppState.currentMonth).padStart(2, '0');
+  document.getElementById('vacationStartInput').value = `${AppState.currentYear}-${mStr}-09`;
+  document.getElementById('vacationEndInput').value = `${AppState.currentYear}-${mStr}-25`;
+  document.getElementById('vacationTypeSelect').value = 'VIL';
+  document.getElementById('vacationLopDaysInput').value = '0';
+  document.getElementById('vacationReturnDateInput').value = '';
+  updateVacationSummaryPreview();
+
+  // Wire up live preview
+  ['vacationStartInput','vacationEndInput','vacationLopDaysInput'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.oninput = updateVacationSummaryPreview;
+  });
+
+  openModal('vacationModal');
+};
+
+window.openEditVacationModal = function(empId, startDate) {
+  const vac = AppState.vacations.find(v => v.employeeId.toLowerCase() === empId.toLowerCase() && v.startDate === startDate);
+  if (!vac) { showToast('Vacation record not found.', 'error'); return; }
+
+  _vacationEditKey = `${empId}|${startDate}`;
+  document.getElementById('vacationModalTitle').textContent = 'Edit Vacation Period';
+  document.getElementById('vacationSubmitBtn').textContent = 'Update Vacation';
+
+  // Populate employee dropdown (locked to this employee)
+  const select = document.getElementById('vacationEmpSelect');
+  select.innerHTML = AppState.employees.map(e => `<option value="${e.id}">${e.name} (${e.id})</option>`).join('');
+  select.value = vac.employeeId;
+  select.disabled = true; // employee can't be changed during edit
+
+  document.getElementById('vacationTypeSelect').value = vac.leaveType || 'VIL';
+  document.getElementById('vacationStartInput').value = vac.startDate;
+  document.getElementById('vacationEndInput').value = vac.endDate;
+  document.getElementById('vacationLopDaysInput').value = vac.lopDays || 0;
+  document.getElementById('vacationReturnDateInput').value = vac.returnDate || '';
+
+  // Wire up live preview
+  ['vacationStartInput','vacationEndInput','vacationLopDaysInput'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.oninput = updateVacationSummaryPreview;
+  });
+  updateVacationSummaryPreview();
+
+  openModal('vacationModal');
+};
+
+async function handleVacationFormSubmit(e) {
+  e.preventDefault();
+  const empId = document.getElementById('vacationEmpSelect').value;
+  const leaveType = document.getElementById('vacationTypeSelect').value || 'VIL';
+  const startDate = document.getElementById('vacationStartInput').value;
+  const endDate = document.getElementById('vacationEndInput').value;
+  const lopDays = parseInt(document.getElementById('vacationLopDaysInput').value || '0', 10) || 0;
+  const returnDate = document.getElementById('vacationReturnDateInput').value || '';
+
+  if (!empId || !startDate || !endDate) {
+    showToast('Please fill all vacation fields.', 'error');
+    return;
+  }
+
+  if (startDate > endDate) {
+    showToast('Start Date cannot be after End Date.', 'error');
+    return;
+  }
+
+  const totalDays = calculateDaysBetween(startDate, endDate);
+  if (lopDays > totalDays) {
+    showToast(`LOP days (${lopDays}) cannot exceed total vacation duration (${totalDays} days).`, 'error');
+    return;
+  }
+
+  const empName = getEmployeeNameById(empId);
+  const nowStr = formatDateTimeNow();
+
+  const vacationData = {
+    employeeId: empId,
+    employeeName: empName,
+    leaveType: leaveType,
+    startDate: startDate,
+    endDate: endDate,
+    lopDays: lopDays,
+    returnDate: returnDate,
+    createdAt: nowStr
+  };
+
+  if (_vacationEditKey) {
+    // EDIT MODE — replace existing record
+    const [origEmpId, origStartDate] = _vacationEditKey.split('|');
+    const idx = AppState.vacations.findIndex(v => v.employeeId.toLowerCase() === origEmpId.toLowerCase() && v.startDate === origStartDate);
+    if (idx >= 0) {
+      vacationData.createdAt = AppState.vacations[idx].createdAt; // preserve original created date
+      vacationData.rowIndex = AppState.vacations[idx].rowIndex;
+      AppState.vacations[idx] = vacationData;
+    }
+    saveLocalData();
+    closeAllModals();
+    renderApp();
+    showToast(`Vacation updated for ${empName} (${startDate} to ${endDate}).`, 'success');
+    if (AppState.apiUrl) {
+      sendGasRequest('updateVacation', { ...vacationData, originalStartDate: origStartDate }).catch(console.error);
+    }
+  } else {
+    // ADD MODE
+    AppState.vacations.push(vacationData);
+    saveLocalData();
+    closeAllModals();
+    renderApp();
+    showToast(`Vacation period added for ${empName} (${startDate} to ${endDate}).`, 'success');
+    if (AppState.apiUrl) {
+      sendGasRequest('addVacation', vacationData).catch(console.error);
+    }
+  }
+}
+
+window.deleteVacationRecord = async function(empId, startDate) {
+  if (!confirm(`Are you sure you want to remove this vacation period?`)) return;
+
+  AppState.vacations = AppState.vacations.filter(v => !(v.employeeId.toLowerCase() === empId.toLowerCase() && v.startDate === startDate));
+  saveLocalData();
+  renderApp();
+  showToast(`Vacation period removed.`, 'success');
+
+  if (AppState.apiUrl) {
+    sendGasRequest('deleteVacation', { employeeId: empId, startDate: startDate }).catch(console.error);
+  }
+};
+
+// ==============================================================================
+// 9. HOLIDAY MANAGEMENT
+// ==============================================================================
+
+window.openAddHolidayModal = function() {
+  const mStr = String(AppState.currentMonth).padStart(2, '0');
+  document.getElementById('holidayDateInput').value = `${AppState.currentYear}-${mStr}-23`;
+  document.getElementById('holidayNameInput').value = 'Company Holiday';
+  openModal('holidayModal');
+};
+
+async function handleHolidayFormSubmit(e) {
+  e.preventDefault();
+  const date = document.getElementById('holidayDateInput').value;
+  const name = document.getElementById('holidayNameInput').value.trim();
+
+  if (!date || !name) {
+    showToast('Date and Holiday Name are required.', 'error');
+    return;
+  }
+
+  const existingIdx = AppState.holidays.findIndex(h => h.date === date);
+  if (existingIdx >= 0) {
+    AppState.holidays[existingIdx].holidayName = name;
+  } else {
+    AppState.holidays.push({
+      date: date,
+      holidayName: name,
+      createdAt: formatDateTimeNow()
+    });
+  }
+
+  saveLocalData();
+  closeAllModals();
+  renderApp();
+  showToast(`Holiday "${name}" saved for ${formatDateForDisplay(date)}.`, 'success');
+
+  if (AppState.apiUrl) {
+    sendGasRequest('addHoliday', { date, holidayName: name }).catch(console.error);
+  }
+}
+
+window.deleteHolidayRecord = async function(date) {
+  if (!confirm(`Remove holiday on ${formatDateForDisplay(date)}?`)) return;
+
+  AppState.holidays = AppState.holidays.filter(h => h.date !== date);
+  saveLocalData();
+  renderApp();
+  showToast(`Holiday removed.`, 'success');
+
+  if (AppState.apiUrl) {
+    sendGasRequest('deleteHoliday', { date: date }).catch(console.error);
+  }
+};
+
+// ==============================================================================
+// 10. GOOGLE APPS SCRIPT API INTEGRATION
+// ==============================================================================
+
+async function sendGasRequest(action, payload = {}) {
+  if (!AppState.apiUrl) return null;
+
+  try {
+    const url = AppState.apiUrl;
+    const body = JSON.stringify({ action: action, ...payload });
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8' // Text plain avoids unnecessary preflight blocking in Apps Script
+      },
+      body: body
+    });
+
+    const result = await response.json();
+    return result;
+  } catch (error) {
+    console.error(`GAS API Error (${action}):`, error);
+    throw error;
+  }
+}
+
+async function syncWithGoogleAppsScript(showToastFeedback = false) {
+  if (!AppState.apiUrl) {
+    if (showToastFeedback) showToast('Please enter your Google Apps Script URL in Settings first.', 'warning');
+    return;
+  }
+
+  AppState.isLoading = true;
+  updateConnectionBadge(false, 'Syncing...');
+
+  try {
+    const fetchUrl = `${AppState.apiUrl}${AppState.apiUrl.includes('?') ? '&' : '?'}action=getAllData&year=${AppState.currentYear}&month=${AppState.currentMonth}`;
+    const response = await fetch(fetchUrl);
+    const result = await response.json();
+
+    if (result && result.success && result.data) {
+      AppState.isConnected = true;
+      const data = result.data;
+
+      if (Array.isArray(data.employees) && data.employees.length > 0) {
+        AppState.employees = data.employees;
+      }
+      if (Array.isArray(data.attendance)) {
+        AppState.attendance = data.attendance;
+      }
+      if (Array.isArray(data.vacations)) {
+        AppState.vacations = data.vacations;
+      }
+      if (Array.isArray(data.holidays)) {
+        AppState.holidays = data.holidays;
+      }
+      if (data.settings && typeof data.settings === 'object') {
+        AppState.settings = { ...DEFAULT_SETTINGS, ...data.settings };
+      }
+
+      saveLocalData();
+      updateConnectionBadge(true, 'Google Apps Script Live');
+      if (showToastFeedback) showToast('Data synchronized successfully with Google Sheets!', 'success');
+      renderApp();
+    } else {
+      throw new Error(result.message || 'Invalid API response format');
+    }
+  } catch (err) {
+    console.warn('Sync failed, continuing with local store:', err);
+    AppState.isConnected = false;
+    updateConnectionBadge(false, 'Live Sync Error (Using Local)');
+    if (showToastFeedback) showToast(`Sync issue: ${err.message}. Using local storage.`, 'error');
+  } finally {
+    AppState.isLoading = false;
+  }
+}
+
+async function testGasConnection() {
+  const urlInput = document.getElementById('gasApiUrlInput');
+  const testUrl = urlInput ? urlInput.value.trim() : '';
+
+  if (!testUrl) {
+    showToast('Please enter a Web App URL to test.', 'error');
+    return;
+  }
+
+  showToast('Testing Google Apps Script connection...', 'info');
+
+  try {
+    const pingUrl = `${testUrl}${testUrl.includes('?') ? '&' : '?'}action=ping`;
+    const res = await fetch(pingUrl);
+    const json = await res.json();
+
+    if (json && json.success) {
+      showToast('Connection verified! Google Apps Script is responding correctly.', 'success');
+      AppState.apiUrl = testUrl;
+      localStorage.setItem(STORAGE_KEYS.API_URL, testUrl);
+      AppState.isConnected = true;
+      updateConnectionBadge(true, 'Google Apps Script Live');
+      syncWithGoogleAppsScript(false);
+    } else {
+      showToast(`Connected but received error: ${json.message || 'Unknown'}`, 'warning');
+    }
+  } catch (err) {
+    showToast(`Connection failed. Check Web App URL & deployment permissions. (${err.message})`, 'error');
+  }
+}
+
+function handleGasSettingsSubmit(e) {
+  e.preventDefault();
+  const url = document.getElementById('gasApiUrlInput').value.trim();
+  AppState.apiUrl = url;
+  localStorage.setItem(STORAGE_KEYS.API_URL, url);
+
+  if (url) {
+    showToast('Web App URL saved. Syncing data...', 'success');
+    syncWithGoogleAppsScript(true);
+  } else {
+    showToast('Web App URL cleared. Switched to Local Demo Mode.', 'info');
+    updateConnectionBadge(false, 'Local Demo Mode');
+  }
+}
+
+function copyGasScript() {
+  const code = document.getElementById('gasCodeText')?.innerText;
+  if (!code) return;
+
+  navigator.clipboard.writeText(code).then(() => {
+    showToast('Google Apps Script (Code.gs) copied to clipboard!', 'success');
+  }).catch(() => {
+    showToast('Unable to auto-copy. Please select and copy manually.', 'warning');
+  });
+}
+
+// ==============================================================================
+// 11. CSV EXPORT & PRINT
+// ==============================================================================
+
+function exportToCsv() {
+  const monthDays = getMonthDays(AppState.currentYear, AppState.currentMonth);
+  const monthName = getMonthName(AppState.currentMonth);
+  
+  // Headers
+  const headerRow = [
+    'Employee ID',
+    'Employee Name',
+    'Status',
+    ...monthDays.map(d => `${d.day} (${d.dayName})`),
+    'Present (P)',
+    'Sick Leave (SL)',
+    'Casual Leave (CL)',
+    'Wellness Leave (WL)',
+    'Loss of Pay (LOP)',
+    'Half-Day LOP',
+    'Half-Day SL',
+    'Vacation (VIL)',
+    'Holiday (H)',
+    'Payable Days'
+  ];
+
+  const rows = [headerRow];
+
+  AppState.employees.forEach(emp => {
+    const tally = createEmptyTally();
+    const dayValues = [];
+
+    monthDays.forEach(day => {
+      const res = calculateAttendanceStatus(emp.id, day.date, day);
+      const st = normalizeStatus(res.status);
+      dayValues.push(st);
+      addToTally(tally, st);
+    });
+
+    const payable = computePayableDays(tally);
+
+    rows.push([
+      `"${emp.id}"`,
+      `"${emp.name}"`,
+      `"${emp.status}"`,
+      ...dayValues.map(v => `"${v}"`),
+      tally.P,
+      tally.SL,
+      tally.CL,
+      tally.WL,
+      tally.LOP,
+      tally.HLOP,
+      tally.HSL,
+      tally.VIL,
+      tally.H,
+      payable
+    ]);
+  });
+
+  const csvContent = 'data:text/csv;charset=utf-8,' + rows.map(e => e.join(',')).join('\n');
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement('a');
+  link.setAttribute('href', encodedUri);
+  link.setAttribute('download', `Attendance_${monthName}_${AppState.currentYear}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  showToast(`Exported ${monthName} ${AppState.currentYear} attendance to CSV.`, 'success');
+}
+
+function printRegister() {
+  window.print();
+}
+
+// ==============================================================================
+// 12. UTILITIES & TOAST (Strict 3-Second Timeout)
+// ==============================================================================
+
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `
+    <span>${message}</span>
+    <button style="background:none;border:none;color:#FFF;cursor:pointer;font-size:16px;line-height:1;" onclick="this.parentElement.remove()">&times;</button>
+  `;
+
+  container.appendChild(toast);
+
+  // Exact 3.0 second lifetime
+  setTimeout(() => {
+    if (toast.parentElement) {
+      toast.remove();
+    }
+  }, 3000);
+}
+
+function openModal(modalId) {
+  const modal = document.getElementById(modalId);
+  if (modal) modal.classList.add('open');
+}
+
+function closeAllModals() {
+  document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('open'));
+  AppState.activeCellTarget = null;
+}
+
+function getMonthName(monthNumber) {
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  return months[monthNumber - 1] || '';
+}
+
+function formatDateForDisplay(dateStr) {
+  if (!dateStr) return '';
+  const parts = dateStr.split('-');
+  if (parts.length === 3) {
+    return `${parts[1]}/${parts[2]}/${parts[0]}`;
+  }
+  return dateStr;
+}
+
+function formatDateKey(dateObj) {
+  if (!dateObj) return '';
+  if (typeof dateObj === 'string') {
+    const parts = dateObj.trim().split(/[-/]/);
+    if (parts.length === 3) {
+      if (parts[0].length === 4) return `${parts[0]}-${parts[1].padStart(2,'0')}-${parts[2].padStart(2,'0')}`;
+      return `${parts[2]}-${parts[0].padStart(2,'0')}-${parts[1].padStart(2,'0')}`;
+    }
+    return dateObj;
+  }
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatDateTimeNow() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const hr = String(now.getHours()).padStart(2, '0');
+  const min = String(now.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${d} ${hr}:${min}`;
+}
+
+function calculateDaysBetween(startDateStr, endDateStr) {
+  if (!startDateStr || !endDateStr) return 0;
+  const start = new Date(startDateStr);
+  const end = new Date(endDateStr);
+  const diffTime = Math.abs(end - start);
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+  return diffDays;
+}
+
+function getEmployeeNameById(id) {
+  const emp = AppState.employees.find(e => e.id.toLowerCase() === String(id).toLowerCase());
+  return emp ? emp.name : id;
+}
